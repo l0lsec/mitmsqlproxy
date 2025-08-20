@@ -483,19 +483,6 @@ class MSSQLServerProtocol(protocol.Protocol):
             self.transport.write(data)
 
 
-class RowPrinter:
-    def __init__(self):
-        self._buffer = ''
-
-    def logMessage(self, message):
-        if message in ('\n', '\r'):
-            if self._buffer:
-                LOG.warning(self._buffer)
-                self._buffer = ''
-        else:
-            self._buffer += message
-
-
 class MSSQLClientProtocol(protocol.Protocol):
     def __init__(self):
         self.ctx = SSL.Context(SSL.TLS_METHOD)
@@ -505,10 +492,6 @@ class MSSQLClientProtocol(protocol.Protocol):
         self.tls_enabled = False
         self.tls_finished = False
         self.tdsLoginCache = None
-        self.rowPrinter = RowPrinter()
-        self.tdsParser = tds.MSSQL('', rowsPrinter=self.rowPrinter)
-        self._responseBuffer = b''
-        self._serverBuffer = b''
 
     def connectionMade(self):
         self.factory.server.client = self
@@ -546,55 +529,26 @@ class MSSQLClientProtocol(protocol.Protocol):
                     except SSL.WantReadError:
                         break
 
-        self._serverBuffer += data
+        packet = tds.TDSPacket(data)
+#        if packet.fields['Type'] ==  TDS_RESPONSE and packet.fields['SPID'] == 0:
+        if packet.fields['Type'] ==  TDS_RESPONSE and packet.fields['Data'][0] == 0:
+            preloginResponse = TDSPreLogin(data)
 
-        while True:
-            if len(self._serverBuffer) < TDS_HEADER_SIZE:
-                break
+            if (preloginResponse.getEncryptionOption() == tds.TDS_ENCRYPT_ON or preloginResponse.getEncryptionOption() == tds.TDS_ENCRYPT_REQ) and Config.serverRequiresEncryption:
+                LOG.info("server side: TLS required - enabling") 
+                self.tls_enabled = True
+                try:
+                   self.tls.do_handshake()
+                except SSL.WantReadError:
+                    pass
+                data2 = self.tls.bio_read(TLS_PACKET_SIZE)
+                handshake_req = tds.TDSPacket()
+                handshake_req['Type'] = tds.TDS_PRE_LOGIN
+                handshake_req['Data'] = data2
+                LOG.debug("server side: sending TLS hello: %s",handshake_req.getData())
+                self.transport.write(handshake_req.getData())
 
-            packet_length = struct.unpack('>H', self._serverBuffer[2:4])[0]
-            if len(self._serverBuffer) < packet_length:
-                break
-
-            packet_data = self._serverBuffer[:packet_length]
-            self._serverBuffer = self._serverBuffer[packet_length:]
-            packet = tds.TDSPacket(packet_data)
-
-            if packet.fields['Type'] ==  TDS_RESPONSE and packet.fields['Data'][0] == 0:
-                preloginResponse = TDSPreLogin(packet_data)
-
-                if (preloginResponse.getEncryptionOption() == tds.TDS_ENCRYPT_ON or preloginResponse.getEncryptionOption() == tds.TDS_ENCRYPT_REQ) and Config.serverRequiresEncryption:
-                    LOG.info("server side: TLS required - enabling")
-                    self.tls_enabled = True
-                    try:
-                       self.tls.do_handshake()
-                    except SSL.WantReadError:
-                        pass
-                    data2 = self.tls.bio_read(TLS_PACKET_SIZE)
-                    handshake_req = tds.TDSPacket()
-                    handshake_req['Type'] = tds.TDS_PRE_LOGIN
-                    handshake_req['Data'] = data2
-                    LOG.debug("server side: sending TLS hello: %s",handshake_req.getData())
-                    self.transport.write(handshake_req.getData())
-            else:
-                self._responseBuffer += packet.fields['Data']
-                if packet.fields['Status'] & tds.TDS_STATUS_EOM:
-                    try:
-                        replies = self.tdsParser.parseReply(self._responseBuffer)
-                        if replies:
-                            self.tdsParser.replies = replies
-                            self.tdsParser.printReplies(error_logger=LOG.error, info_logger=LOG.warning)
-                            self.tdsParser.printRows()
-                            self.tdsParser.rows = []
-                            self.tdsParser.replies = {}
-                            if tds.TDS_DONE_TOKEN in replies:
-                                self.tdsParser.colMeta = []
-                    except Exception as e:
-                        LOG.debug("Failed to parse server response: %s", e)
-                    finally:
-                        self._responseBuffer = b''
-
-            self.factory.server.write(packet.getData())
+        self.factory.server.write(data)
 
     # Proxy => Server
     def write(self, data):
