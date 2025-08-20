@@ -44,6 +44,7 @@ from impacket import ntlm
 import struct
 import calendar
 import time
+import datetime
 import codecs
 
 from twisted.internet import protocol, reactor
@@ -757,11 +758,12 @@ def main():
     logging.getLogger().setLevel(Config.debugLevel)
     logging.debug(version.getInstallationPath())
 
-    if Config.logFile:
-        handler = logging.FileHandler(Config.logFile, "a")
-        formatter = logging.Formatter('%(asctime)s %(message)s')
-        handler.setFormatter(CustomFormatter(formatter._fmt))
-        LOG.addHandler(handler)
+    if Config.logFile is None:
+        Config.logFile = datetime.datetime.now().strftime("mitmsqlproxy_%Y%m%d_%H%M%S.log")
+    handler = logging.FileHandler(Config.logFile, "a")
+    formatter = logging.Formatter('%(asctime)s %(message)s')
+    handler.setFormatter(CustomFormatter(formatter._fmt))
+    LOG.addHandler(handler)
 
     show_banner()
 
