@@ -190,7 +190,32 @@ class MSSQLServerProtocol(protocol.Protocol):
         self.findSQLString(data,"CREATE LOGIN")
         self.findSQLString(data,"ALTER LOGIN")
 
+    def findAllSQLStrings(self,data):
+        keywords = [
+            "SELECT", "INSERT", "UPDATE", "DELETE", "EXEC", "DECLARE",
+            "CREATE", "DROP", "ALTER", "TRUNCATE", "MERGE", "GRANT",
+            "REVOKE", "USE", "WITH", "IF", "BEGIN", "COMMIT",
+            "ROLLBACK",
+        ]
+        seen = set()
+        lower_data = data.lower()
+        for kw in keywords:
+            enc = kw.encode('utf-16le')
+            start = lower_data.find(enc.lower())
+            while start > -1:
+                end = data[start:].find(b"\x00\x00\x00\x00")
+                if end > -1:
+                    sql = data[start:start+end].decode('utf-16le', errors='ignore')
+                else:
+                    sql = data[start:].decode('utf-16le', errors='ignore')
+                sql = sql.strip()
+                if sql and sql not in seen:
+                    LOG.warning("string: %s%s%s",RED,sql,END)
+                    seen.add(sql)
+                start = lower_data.find(enc.lower(), start + 2)
+
     def checkPacketforStrings(self,data):
+        self.findAllSQLStrings(data)
         self.findSQLPasswords(data)
         for query in Config.findQuery or []:
             self.findSQLString(data,query)
@@ -633,7 +658,7 @@ def show_banner():
 ░  ░      ░ ▒ ░    ░    ░  ░      ░   ░ ░▒  ░ ░ ░ ▒░  ░ ░ ░ ▒  ░   ░▒ ░       ░▒ ░ ▒░  ░ ▒ ▒░ ░░   ░▒ ░ ▓██ ░▒░ 
 ░      ░    ▒ ░  ░      ░      ░      ░  ░  ░     ░   ░   ░ ░      ░░         ░░   ░ ░ ░ ░ ▒   ░    ░   ▒ ▒ ░░  
        ░    ░                  ░            ░      ░        ░  ░               ░         ░ ░   ░    ░   ░ ░     
-by Marcin Ochab                                                                                         ░ ░     
+by Marcin Ochab enhanced by Sedric Louissaint                                                                                        ░ ░     
 {END}"""
     print(banner)
 
