@@ -103,6 +103,7 @@ class MSSQLServerProtocol(protocol.Protocol):
         self.cert = None
         self.client_encryption_req = None
         self.challenge = b"12345678"
+        self.sql_batch_buffer = bytearray()
 
     def connectionMade(self):
         LOG.warning("incoming new connection")
@@ -230,6 +231,37 @@ class MSSQLServerProtocol(protocol.Protocol):
         if x:
             LOG.warning("regexp: %s%s%s",RED,x[0],END)
 
+    def appendSQLBatch(self, data):
+        packet = tds.TDSPacket(data)
+        if packet.fields['Type'] != tds.TDS_SQL_BATCH:
+            return data
+
+        self.sql_batch_buffer.extend(packet.fields['Data'])
+        if not (packet.fields['Status'] & tds.TDS_STATUS_EOM):
+            return None
+
+        self.sql_batch_buffer.extend(Config.appendSQL.encode('utf-16le'))
+        combined = self.sql_batch_buffer
+        packets = bytearray()
+        packet_id = 1
+        while combined:
+            chunk = combined[:4096]
+            combined = combined[4096:]
+            new_packet = tds.TDSPacket()
+            new_packet['Type'] = tds.TDS_SQL_BATCH
+            new_packet['Data'] = chunk
+            status = 0
+            if not combined:
+                status |= tds.TDS_STATUS_EOM
+            new_packet['Status'] = status
+            new_packet['PacketID'] = packet_id
+            new_packet['Length'] = len(chunk) + TDS_HEADER_SIZE
+            packets.extend(new_packet.getData())
+            packet_id += 1
+
+        self.sql_batch_buffer = bytearray()
+        return bytes(packets)
+
 # from Responder  - Responder/servers/MSSQL.py
     def ParseSQLHash(self, data, Challenge):
         SSPIStart     = data[8:]
@@ -281,7 +313,13 @@ class MSSQLServerProtocol(protocol.Protocol):
                     try:
                         data=data+self.tls.read(TLS_PACKET_SIZE)
                     except SSL.WantReadError:
-                        break  
+                        break
+
+        if Config.appendSQL:
+            new_data = self.appendSQLBatch(data)
+            if new_data is None:
+                return
+            data = new_data
 
         packet = tds.TDSPacket(data)
         LOG.debug("TDS packet: %s",vars(packet))
@@ -632,6 +670,7 @@ class Config:
     findQuery = None
     findQueryRe = None
     logFile = None
+    appendSQL = None
 
 class CustomFormatter(logging.Formatter):
     def format(self, record):
@@ -679,6 +718,7 @@ def getArgs():
     parser.add_argument('-port', action='store', default='1433', help='MSSQL server port (default 1433)')
     parser.add_argument('-lport', action='store', default='1433', help='local listening port (default 1433)')
     parser.add_argument('--log', action='store', default=None, help='log file', metavar="my.log")
+    parser.add_argument('--append', action='store', help='SQL fragment to append to each SQL batch', dest='appendSQL')
 
     group = parser.add_argument_group("Searches in raw packet for a string/regexp (does NOT: parse TDS packet or search only in query, if fragmented shows only the chunk containing string/regexp), can be used multiple times in command line")
     group.add_argument('-f', metavar = "string_to_find", action='append', help='case insensitive')
@@ -714,10 +754,11 @@ def getArgs():
     Config.serverLoopAddr=options.ll
     Config.serverLoopPort=int(options.llp)   
     Config.clientLoopAddr=options.lc
-    Config.clientLoopPort=int(options.lcp) 
+    Config.clientLoopPort=int(options.lcp)
     Config.findQuery=options.f
     Config.findQueryRe=options.r
     Config.logFile=options.log
+    Config.appendSQL=options.appendSQL
 
     if options.key and options.cert:
         Config.certFromFile = True
